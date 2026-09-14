@@ -6,7 +6,7 @@
 #include <ostream>
 #include <variant>
 
-#include "ClAYGDecoder.h"
+#include "CAYGDecoder.h"
 #include "DecodingGraph.h"
 #include "Logger.h"
 
@@ -24,9 +24,9 @@ int main()
     {
         shared_ptr<Decoder> decoder;
         if (decoder_name == "clayg")
-            decoder = make_shared<ClAYGDecoder>(args);
+            decoder = make_shared<CAYGDecoder>(args);
         else if (decoder_name == "sl_clayg")
-            decoder = make_shared<SingleLayerClAYGDecoder>(args);
+            decoder = make_shared<SingleLayerCAYGDecoder>(args);
         else if (decoder_name == "uf")
             decoder = make_shared<UnionFindDecoder>(args);
         decoders.push_back(decoder);

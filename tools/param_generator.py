@@ -8,7 +8,7 @@ import os
 parser = argparse.ArgumentParser(description="Generate params.txt and update SLURM array job script.")
 parser.add_argument("config_file", help="Path to configuration file (e.g. run_config.txt)")
 parser.add_argument("--param_file", default="generated_params.txt", help="Path to output parameter file")
-parser.add_argument("--batch_file", default="submit_clayg_array_job.sh", help="Path to SLURM batch file")
+parser.add_argument("--batch_file", default="submit_cayg_array_job.sh", help="Path to SLURM batch file")
 args = parser.parse_args()
 
 CONFIG_FILE = args.config_file

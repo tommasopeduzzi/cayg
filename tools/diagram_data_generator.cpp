@@ -9,7 +9,7 @@
 #include <regex>
 #include <sstream>
 
-#include "ClAYGDecoder.h"
+#include "CAYGDecoder.h"
 #include "DecodingGraph.h"
 #include "Logger.h"
 
@@ -35,9 +35,9 @@ int main()
     {
         shared_ptr<Decoder> decoder;
         if (decoder_name == "clayg")
-            decoder = make_shared<ClAYGDecoder>(args);
+            decoder = make_shared<CAYGDecoder>(args);
         else if (decoder_name == "sl_clayg")
-            decoder = make_shared<SingleLayerClAYGDecoder>(args);
+            decoder = make_shared<SingleLayerCAYGDecoder>(args);
         else if (decoder_name == "uf")
             decoder = make_shared<UnionFindDecoder>(args);
         decoders.push_back(decoder);
@@ -45,10 +45,10 @@ int main()
 
     shared_ptr<DecodingGraph> decoding_graph = DecodingGraph::repetition_code(D, D);
 
-    logger.set_dump_dir("data/explanations");
+    logger.set_dump_dir("data/diagrams/explanations");
     logger.set_dump_enabled(true);
 
-    variant<string, int> run_id = "staircase";
+    variant<string, int> run_id = "presentation";
     auto next_run_id = [](variant<string, int> current_run_id) {
         if (holds_alternative<string>(current_run_id))
             return false;
@@ -65,6 +65,9 @@ int main()
 
     double error_rate = 0.04;
     bool use_fixed_error_ids = true;
+    // read in from file (if present). Format accepted per-line:
+    //  - numeric: "<type>-<round>-<id>" e.g. "1-3-24"
+    //  - named:   "NORMAL-3-24" or "MEASUREMENT-2-5"
     auto parse_error_id_line = [](const std::string& line) -> std::optional<DecodingGraphEdge::Id> {
         std::string s = line;
         // trim
@@ -112,6 +115,7 @@ int main()
         }
     }
 
+    std::cout << fixed_error_ids.size() << " fixed error IDs loaded.\n";
 
     do {
         logger.set_run_id(run_id_to_string(run_id));

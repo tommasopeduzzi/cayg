@@ -10,7 +10,7 @@
 
 #include "DecodingGraph.h"
 #include "UnionFindDecoder.h"
-#include "ClAYGDecoder.h"
+#include "CAYGDecoder.h"
 #include "Logger.h"
 #include "LogicalComputer.h"
 #include "ParsingUtils.h"
@@ -371,9 +371,9 @@ int main(int argc, char* argv[])
         if (decoder_name == "uf" || decoder_name == "unionfind") {
             decoders.push_back(make_shared<UnionFindDecoder>(decoder_args));
         } else if (decoder_name == "clayg") {
-            decoders.push_back(make_shared<ClAYGDecoder>(decoder_args));
+            decoders.push_back(make_shared<CAYGDecoder>(decoder_args));
         } else if (decoder_name == "single_layer_clayg" || decoder_name == "sl_clayg") {
-            decoders.push_back(make_shared<SingleLayerClAYGDecoder>(decoder_args));
+            decoders.push_back(make_shared<SingleLayerCAYGDecoder>(decoder_args));
         } else {
             cerr << "Unknown decoder: " << decoder_name << endl;
             exit(1);

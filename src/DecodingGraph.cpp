@@ -248,7 +248,7 @@ std::shared_ptr<DecodingGraph> DecodingGraph::single_layer_copy(std::shared_ptr<
     {
         return DecodingGraph::repetition_code(graph->d(), 1);
     }
-    throw runtime_error("SingleLayerClAYGDecoder: Unsupported code type " + graph->code_name());
+    throw runtime_error("SingleLayerCAYGDecoder: Unsupported code type " + graph->code_name());
 }
 
 optional<shared_ptr<DecodingGraphNode>> DecodingGraph::node(const DecodingGraphNode::Id id) {

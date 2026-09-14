@@ -50,6 +50,16 @@ Cluster files (optional):
           z = round
     Finally, multiply x and y by 3.
 
+Cluster background:
+  When decoding steps are shown, a translucent halo is drawn behind each cluster
+  (its edges redrawn with a fat, round-capped stroke so they melt into one
+  smooth blob) in that cluster's colour. The halo colour can be overridden to
+  green for chosen decoding steps (e.g. once a cluster becomes neutral) by
+  editing GraphVisualizer3D.neutral_clusters, calling set_cluster_neutral(step,
+  cluster_id), or placing a "neutral_clusters.txt" file in the steps directory
+  with lines of the form "step, cluster_id" (or "step, all"). Tune the look with
+  cluster_halo_width and cluster_background_alpha.
+
 Additional Option:
   A "Single Layer" mode will hide all Ancilla nodes not in a selected layer
   (but Virtual nodes are always rendered). In this mode the view’s z‑limits are adjusted
@@ -82,6 +92,26 @@ from matplotlib.colors import to_rgba
 from matplotlib.widgets import CheckButtons, Slider, Button
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from PIL import Image, ImageDraw, ImageFont
+
+
+class _UniformAlphaFilter:
+    """Agg post-processing filter: render the artist opaque, then knock the
+    whole rasterised result down to a single alpha. Overlapping strokes inside
+    one artist stop compounding, so a fat multi-segment halo reads as one flat
+    translucent blob instead of a patchwork of darker overlaps.
+
+    Only takes effect with an Agg-based backend (TkAgg, the Agg used by
+    savefig, ...); with others the artist just draws at its own colour alpha.
+    """
+
+    def __init__(self, alpha):
+        self.alpha = float(alpha)
+
+    def __call__(self, im, dpi):
+        out = np.array(im, copy=True)
+        out[..., 3] *= self.alpha
+        return out, 0, 0
+
 
 def debounce(wait):
     def decorator(fn):
@@ -128,6 +158,10 @@ class GraphVisualizer3D:
         self.selected_layer = 0
         # When True, every round is drawn at full opacity (no per-step dimming).
         self.all_rounds_active = False
+        # When set, the "current round" polygon is drawn at this round instead of
+        # the one logged for the current decoding step (used by the results image
+        # to pin it at max height).
+        self._forced_step_round = None
         
         # Colors 
         self.node_color_palette = {
@@ -141,15 +175,38 @@ class GraphVisualizer3D:
             "correction": "#32CD32",  # LimeGreen
             "cluster": [
                 # Different shades of blue that still stand out against a white background
-                "#007BFF",  
-                "#6495ED",  
+                "#00D5FF",  
+                "#0059FF",  
                 "#00BFFF", 
-                "#0899F3",  
-                "#1E90FF",
-                "#4682B4",
+                "#4000FF",  
+                "#1EFFFF",
+                "#4C42FF",
             ]
         }
         self.current_round_color = 'lightgray'
+
+        # Translucent halo drawn behind each cluster: the cluster edges redrawn
+        # with a fat round-capped stroke, so overlapping/adjacent edges melt into
+        # one smooth blob (the "marching-cubes" look, cheaply). Tinted with the
+        # cluster colour, except for decoding steps listed in ``neutral_clusters``
+        # which force ``neutral_cluster_color`` (flagging neutral clusters).
+        self.cluster_background_alpha = 0.25
+        self.cluster_halo_width = 15.0        # halo stroke width in points
+        self.neutral_cluster_color = "#00E676"  # bright green
+        # {decoding_step: {cluster_id, ...}}; map a step to "all" (or True) to
+        # mark every cluster neutral at that step. Populate it by editing this
+        # dict, calling set_cluster_neutral(), or dropping a plain-text
+        # "neutral_clusters.txt" into step_dir (lines "step, cluster_id" or
+        # "step, all").
+        # self.neutral_clusters = {
+        #     2: {4001},
+        #     3: {4001},
+        #     4: {4001, 2003},
+        # }
+        self.neutral_clusters = {
+            18: {1002},
+            23: {4001}
+        }
 
         # Cached computed layout: node -> (x,y,z) and node colors.
         self.pos = {}
@@ -163,6 +220,7 @@ class GraphVisualizer3D:
         self.error_edge_collection = None
         self.correction_edge_collection = None
         self.cluster_edge_collections = None
+        self.cluster_background_polys = []
         self.node_texts = []
         self.edge_texts = []  # For edge labels.
 
@@ -329,8 +387,60 @@ class GraphVisualizer3D:
                 self.step_data[step] = (step_round, step_clusters)
             except Exception as e:
                 print(f"Error reading decoding step file {step_file}: {e}")
+        neutral_file = os.path.join(self.step_dir, "neutral_clusters.txt")
+        if os.path.exists(neutral_file):
+            self._load_neutral_clusters(neutral_file)
         if steps:
             self.current_decoding_step = steps[0]
+
+    def _load_neutral_clusters(self, path):
+        """Load neutral-cluster overrides from a plain-text file.
+
+        Each non-empty, non-comment line is either "step, cluster_id" (mark that
+        one cluster neutral at that decoding step) or "step, all" (mark every
+        cluster neutral at that step).
+        """
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = [p.strip() for p in line.split(',')]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        step = int(parts[0])
+                    except ValueError:
+                        continue
+                    if parts[1].lower() == 'all':
+                        self.neutral_clusters[step] = 'all'
+                    else:
+                        try:
+                            self.set_cluster_neutral(step, int(parts[1]))
+                        except ValueError:
+                            continue
+        except Exception as e:
+            print(f"Error reading neutral clusters file {path}: {e}")
+
+    def set_cluster_neutral(self, step, cluster_id, neutral=True):
+        """Override the halo colour of ``cluster_id`` at decoding ``step`` to the
+        neutral colour (green) instead of the cluster's own colour."""
+        current = self.neutral_clusters.get(step)
+        if current in ('all', True):
+            return
+        ids = current if isinstance(current, set) else set()
+        if neutral:
+            ids.add(cluster_id)
+        else:
+            ids.discard(cluster_id)
+        self.neutral_clusters[step] = ids
+
+    def _is_cluster_neutral(self, step, cluster_id):
+        entry = self.neutral_clusters.get(step, self.neutral_clusters.get('all'))
+        if entry in ('all', True):
+            return True
+        return bool(entry) and cluster_id in entry
 
     def compute_layout(self):
         """Compute positions and colors for all nodes using the provided logic."""
@@ -412,6 +522,7 @@ class GraphVisualizer3D:
         self.ax.add_collection3d(self.correction_edge_collection)
         self.cluster_edge_collections = []
         self.current_round_polys = []
+        self.cluster_background_polys = []
         self.node_texts = []
         self.edge_texts = []
 
@@ -478,11 +589,13 @@ class GraphVisualizer3D:
                     colors.append(to_rgba(self.node_colors[node], alpha=alpha))
         if self.node_scatter is not None:
             self.node_scatter.remove()
-            self.node_scatter = self.ax.scatter(xs, ys, zs, c=colors, s=100)
+            self.node_scatter = self.ax.scatter(xs, ys, zs, c=colors, s=100, zorder=10)
             self.node_scatter.set_visible(self.show_nodes)
         else:
-            self.node_scatter = self.ax.scatter(xs, ys, zs, c=colors, s=100, alpha=0.8)
+            self.node_scatter = self.ax.scatter(xs, ys, zs, c=colors, s=100, alpha=0.8, zorder=10)
             self.node_scatter.set_visible(self.show_nodes)
+        # Keep nodes painted on top of every edge / halo / round polygon.
+        self.node_scatter.set_zorder(10)
 
         # Update node labels.
         for txt in self.node_texts:
@@ -557,7 +670,8 @@ class GraphVisualizer3D:
         if self.show_errors:
             self.error_edge_collection.set_segments(error_segments)
             self.error_edge_collection.set_color(self.edge_colors_palette["error"])
-            self.error_edge_collection.set_linewidth(2.5)
+            self.error_edge_collection.set_linewidth(1.5)
+            self.error_edge_collection.set_zorder(9)
         else:
             self.error_edge_collection.set_segments(np.empty((0, 2, 3)))
 
@@ -565,7 +679,7 @@ class GraphVisualizer3D:
         if self.show_corrections:
             self.correction_edge_collection.set_segments(corrections_segment)
             self.correction_edge_collection.set_color(self.edge_colors_palette["correction"])
-            self.correction_edge_collection.set_linewidth(1.5)
+            self.correction_edge_collection.set_linewidth(3.5)
         else:
             self.correction_edge_collection.set_segments(np.empty((0, 2, 3)))
         
@@ -575,6 +689,9 @@ class GraphVisualizer3D:
         for current_round_poly in self.current_round_polys:
             current_round_poly.remove()
         self.current_round_polys = []
+        for poly in self.cluster_background_polys:
+            poly.remove()
+        self.cluster_background_polys = []
         for collection in self.cluster_edge_collections:
             collection.remove()
         self.cluster_edge_collections = []
@@ -582,9 +699,10 @@ class GraphVisualizer3D:
         # Prepare cluster edges.
         if self.step_dir and self.show_steps:
             step_round, step_clusters = self.step_data.get(self.current_decoding_step, (-1,[]))
-            if step_round >= 0:
+            poly_round = self._forced_step_round if self._forced_step_round is not None else step_round
+            if poly_round >= 0:
                 # Draw a transparent polygon at the current round height.
-                z_height = step_round+0.25
+                z_height = poly_round+0.25
                 x_vals = [min(xs) - 2, max(xs) + 2, max(xs) + 2, min(xs) - 2]+[min(xs) - 2, max(xs) + 2, max(xs) + 2, min(xs) - 2]
                 y_vals = [min(ys) - 2, min(ys) - 2, max(ys) + 2, max(ys) + 2]+[min(ys) - 2, min(ys) - 2, max(ys) + 2, max(ys) + 2]
                 z_vals = [-0.5,-0.5,-0.5,-0.5] + [z_height] * 4
@@ -642,9 +760,30 @@ class GraphVisualizer3D:
                             cluster_segments[cluster_id] = []
                         cluster_segments[cluster_id].append(seg)
                         break
+
             for cluster_id, segments in cluster_segments.items():
-                color = self.edge_colors_palette["cluster"][cluster_id % len(self.edge_colors_palette["cluster"])]
-                collection = Line3DCollection(segments, colors=color, linewidths=2.5)
+                cluster_color = self.edge_colors_palette["cluster"][cluster_id % len(self.edge_colors_palette["cluster"])]
+                if self._is_cluster_neutral(self.current_decoding_step, cluster_id):
+                    halo_color = self.neutral_cluster_color
+                else:
+                    halo_color = cluster_color
+
+                # Halo: the same segments drawn with a fat, round-capped stroke.
+                # Round caps/joins make adjacent and overlapping edges merge into
+                # one smooth blob behind the crisp cluster lines. Drawn opaque
+                # and flattened to a single alpha by the agg filter so the
+                # overlaps don't compound into darker patches.
+                halo = Line3DCollection(
+                    segments,
+                    colors=to_rgba(halo_color, 1.0),
+                    linewidths=self.cluster_halo_width,
+                    capstyle='round', joinstyle='round', zorder=-3,
+                )
+                halo.set_agg_filter(_UniformAlphaFilter(self.cluster_background_alpha))
+                self.ax.add_collection3d(halo)
+                self.cluster_background_polys.append(halo)
+
+                collection = Line3DCollection(segments, colors=cluster_color, linewidths=3.5)
                 self.cluster_edge_collections.append(collection)
                 self.ax.add_collection3d(collection)
 
@@ -731,7 +870,94 @@ class GraphVisualizer3D:
          self.show_errors, self.show_corrections, self.show_steps, self.all_rounds_active) = saved
         self.draw_graph()
 
-    def save_clustering_animation(self, animation_dir, make_comic=False, animation_grid_path=None):
+    def save_results_image(self, output_path, round_=None):
+        """Render the final result: all errors and all corrections, with the
+        current-round polygon pinned at its maximum height.
+
+        :param round_: round to pin the polygon at (default: the highest round
+            seen across all decoding steps).
+        """
+        saved = (self.show_nodes, self.show_node_labels, self.show_edges, self.show_edge_labels,
+                 self.show_errors, self.show_corrections, self.show_steps, self.all_rounds_active,
+                 self.current_decoding_step, self._forced_step_round)
+
+        if round_ is None:
+            round_ = max((r for r, _ in self.step_data.values()), default=self.total_layers - 1)
+
+        self.show_nodes = True
+        self.show_node_labels = False
+        self.show_edges = False
+        self.show_edge_labels = False
+        self.show_errors = True
+        self.show_corrections = True
+        self.show_steps = True
+        self.all_rounds_active = True
+        # Jump to the last step so every correction has arrived (they are gated
+        # by arrival step) and all clusters have been peeled away.
+        if self.decoding_steps:
+            self.current_decoding_step = self.decoding_steps[-1]
+        self._forced_step_round = round_
+
+        self.draw_graph()
+        self.ax.view_init(elev=0, azim=0)
+        self.fig.canvas.draw()
+        self.fig.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+        print(f"[INFO] Saved results image to {output_path}")
+
+        (self.show_nodes, self.show_node_labels, self.show_edges, self.show_edge_labels,
+         self.show_errors, self.show_corrections, self.show_steps, self.all_rounds_active,
+         self.current_decoding_step, self._forced_step_round) = saved
+        self.draw_graph()
+
+    @staticmethod
+    def _crop_frames(paths, crop, padding=0):
+        """Crop the given image files in place to a single shared box.
+
+        ``crop`` may be:
+          - ``False`` -> do nothing;
+          - a 4-tuple ``(left, upper, right, lower)`` -> absolute pixel box;
+          - ``None`` -> auto-fit the union of every frame's non-transparent
+            content, then grow it by ``padding``.
+        ``padding`` is either one number (all sides) or a 4-tuple
+        ``(left, top, right, bottom)``; positive values add margin, negative
+        values eat into the content.
+        """
+        if crop is False:
+            return
+        paths = [p for p in paths if p and os.path.exists(p)]
+        if not paths:
+            return
+
+        if isinstance(crop, (tuple, list)) and len(crop) == 4:
+            box = [int(v) for v in crop]
+        else:
+            if isinstance(padding, (tuple, list)):
+                pl, pt, pr, pb = (int(v) for v in padding)
+            else:
+                pl = pt = pr = pb = int(padding)
+            box = None
+            for p in paths:
+                bbox = Image.open(p).getbbox()  # non-transparent extent
+                if bbox is None:
+                    continue
+                if box is None:
+                    box = list(bbox)
+                else:
+                    box = [min(box[0], bbox[0]), min(box[1], bbox[1]),
+                           max(box[2], bbox[2]), max(box[3], bbox[3])]
+            if box is None:
+                return
+            box = [box[0] - pl, box[1] - pt, box[2] + pr, box[3] + pb]
+
+        for p in paths:
+            im = Image.open(p)
+            clamped = (max(0, box[0]), max(0, box[1]),
+                       min(im.width, box[2]), min(im.height, box[3]))
+            im.crop(clamped).save(p)
+        print(f"[INFO] Cropped {len(paths)} frame(s) to {tuple(box)}")
+
+    def save_clustering_animation(self, animation_dir, make_comic=False, animation_grid_path=None,
+                                  crop=None, crop_padding=0):
         """
         Export images for each cluster step to animation_dir.
         Optionally, combine them into a comic-strip style image.
@@ -741,6 +967,16 @@ class GraphVisualizer3D:
         :param comic_path: path to save comic-strip image
         :param arrow_size: length of arrows in comic strip
         :param spacing: vertical padding in comic strip
+        :param crop: how to trim the exported frames (errors.png, every
+            step_*.png and the gif) so there is no dead border around the
+            drawing. ``None`` (default) auto-crops every frame to one shared
+            box: the union of the rendered (non-transparent) content across all
+            frames, i.e. the current-round polygon at its largest. Pass a
+            4-tuple ``(left, upper, right, lower)`` in pixels to crop to a fixed
+            box instead. Pass ``False`` to disable cropping.
+        :param crop_padding: margin added to the auto-crop box - one number for
+            all sides, or a 4-tuple ``(left, top, right, bottom)``. Negative
+            values crop inward. Ignored when ``crop`` is an absolute box.
         """
         os.makedirs(animation_dir, exist_ok=True)
         print(f"[INFO] Exporting cluster step images to: {animation_dir}")
@@ -758,7 +994,9 @@ class GraphVisualizer3D:
         self.show_corrections = True
         self.show_errors = True
 
-        show_error_steps = [38]
+        # Steps on which to also overlay the errors during the animation
+        # (errors otherwise live in errors.png / results.png only).
+        show_error_steps = []
 
         previous_decoding_step = self.decoding_steps[0] if self.decoding_steps else None
         for step in self.decoding_steps:
@@ -772,12 +1010,6 @@ class GraphVisualizer3D:
 
             self.show_errors = step in show_error_steps
             self.current_decoding_step = step
-
-            # The errors image shown first already represents the initial state,
-            # so skip any leading blank frame (logged before clusters exist).
-            if not exported_files and not self.step_data.get(step, (-1, []))[1]:
-                print(f"[INFO]  Skipping initial blank step {step}")
-                continue
 
             self.draw_graph()
             self.ax.view_init(elev=0, azim=0)
@@ -793,17 +1025,28 @@ class GraphVisualizer3D:
             exported_files.append(output_path)
             print(f"[INFO]  Saved {output_path}")
 
+        # Final result frame: all errors + all corrections, current round pinned
+        # at max height.
+        results_image_path = os.path.join(animation_dir, "results.png")
+        self.save_results_image(results_image_path)
+
         print("[INFO] Export complete.")
+
+        # Trim the dead border off every exported frame, using one shared box so
+        # the frames (and the gif built from them) stay aligned.
+        self._crop_frames([error_image_path] + exported_files + [results_image_path],
+                          crop, crop_padding)
+
         if not make_comic:
             return
-        
+
         if animation_grid_path is None:
             animation_grid_path = os.path.join(animation_dir, "animation.png")
-        
+
         columns = 3
-        # FIXME: make unecessary by cropping images during export as needed
-        crop_margin_width = 200
-        crop_margin_height = 400
+        # Frames are already trimmed by _crop_frames above.
+        crop_margin_width = 0
+        crop_margin_height = 0
         spacing_x = 20
         spacing_y = 20
         include_start_in_comic = False
@@ -857,7 +1100,7 @@ class GraphVisualizer3D:
                 cy = y_offset + max_height // 2
                 centers.append((cx, cy))
         
-        # ClAYG label color arrows
+        # CAYG label color arrows
         correction_arrows = [7, 11]
         new_syndrome_round_arrows = [0,2,4,8,12]
         
@@ -1003,9 +1246,9 @@ class GraphVisualizer3D:
         new_img.save(animation_grid_path)
         print(f"[INFO] Comic strip saved to {animation_grid_path}")
         
-        # Create gif: show the errors first, then every exported step frame.
+        # Create gif: errors first, then every step frame, ending on the result.
         gif_path = os.path.join(animation_dir, "animation.gif")
-        gif_sources = [error_image_path] + exported_files
+        gif_sources = [error_image_path] + exported_files + [results_image_path]
         raw_frames = [Image.open(f).convert("RGBA") for f in gif_sources]
         max_w = max(im.width for im in raw_frames)
         max_h = max(im.height for im in raw_frames)
@@ -1032,7 +1275,31 @@ def main():
     parser.add_argument('--steps', help='Directory containing cluster step files', default=None)
     parser.add_argument("--corrections_file", help="File containing corrections by decoder")
     parser.add_argument('--animation', help='If set, exports each cluster step as an image to directory specified or default.')
+    parser.add_argument('--crop', default=None,
+                        help='Trim exported frames (default: auto-fit to content, 0 px padding). '
+                             '"none" disables it. Auto-fit + padding: "N" (all sides), "X,Y" '
+                             '(left/right, top/bottom) or "L,T,R,B" per side; negatives crop inward. '
+                             '"box:L,T,R,B" is an absolute pixel box instead. Quote it in the shell.')
     args = parser.parse_args()
+
+    crop = None
+    crop_padding = 0
+    if args.crop is not None:
+        raw = args.crop.strip().strip('()[]').replace(' ', '')
+        if raw.lower() == 'none':
+            crop = False
+        elif raw.lower().startswith('box:'):
+            crop = tuple(int(v) for v in raw[4:].split(','))
+        elif ',' in raw:
+            vals = [int(v) for v in raw.split(',')]
+            if len(vals) == 2:
+                crop_padding = (vals[0], vals[1], vals[0], vals[1])
+            elif len(vals) == 4:
+                crop_padding = tuple(vals)
+            else:
+                parser.error('--crop expects "N", "X,Y", "L,T,R,B", "box:L,T,R,B" or "none"')
+        else:
+            crop_padding = int(raw)
 
     if not args.graph_file:
         args.graph_file = f"{args.directory}/{args.run_id}/graph.txt"
@@ -1050,7 +1317,8 @@ def main():
     if args.animation and args.decoder and args.steps and visualizer.decoding_steps:
         animation_dir = args.animation
         os.makedirs(animation_dir, exist_ok=True)
-        visualizer.save_clustering_animation(animation_dir, make_comic=True)
+        visualizer.save_clustering_animation(animation_dir, make_comic=True,
+                                             crop=crop, crop_padding=crop_padding)
         sys.exit(0)
         
     # Create check buttons.

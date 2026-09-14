@@ -12,9 +12,12 @@ This reproduces the style of ``paper/figures/staircase_errors.pdf``.
 Usage:
     python tools/snake_figure.py FOLDER [FOLDER ...] --output out.png
 
-    # Custom labels (one per folder, same order):
+    # Custom labels (one per folder, same order). Either pass them as separate
+    # arguments, or as one ";"-separated string (works with --labels=... too):
     python tools/snake_figure.py uf/animation clayg/animation \
-        --labels "UF" "ClAYG(l=0, g=1)" --output out.png
+        --labels "UF" "CAYG(l=0, g=1)" --output out.png
+    python tools/snake_figure.py uf/animation clayg/animation \
+        --labels="UF;CAYG(l=0, g=1)" --output out.png
 
     # Different column count / image pattern:
     python tools/snake_figure.py FOLDER --columns 3 --image-glob "frame_*.png"
@@ -23,6 +26,23 @@ The images are expected to have a transparent (or white) margin around the
 actual content; that margin is cropped away automatically. If your images do not
 crop well, render them with a transparent background (e.g. matplotlib
 ``savefig(..., transparent=True)``) so the content bounding box can be detected.
+
+Arrow types (optional ``arrows.txt`` in each folder)
+---------------------------------------------------
+Drop a file named ``arrows.txt`` (see ``--arrows-name``) next to the images.
+Each non-comment line describes the arrow(s) for one gap between consecutive
+panels, in order (gap 0 is between the first two panels, i.e. errors -> step 0
+when an errors image is shown). Recognised words:
+
+    grow     black solid    (cluster growth)
+    merge    black dotted   (cluster fusion; aliases: fuse, fusion)
+    measure  blue  solid    (new measurement round; alias: measurement)
+    correct  red   solid    (correction applied; alias: correction)
+
+Put several words on one line to draw that many parallel arrows between the two
+panels, e.g. ``measure grow`` draws a blue and a black arrow side by side. A
+blank line keeps the default (single black arrow); ``none`` draws nothing. Lines
+starting with ``#`` are ignored.
 """
 
 import argparse
@@ -34,6 +54,22 @@ import sys
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 
+# Arrow styles selectable per gap from a folder's ``arrows.txt``.
+DEFAULT_ARROW_STYLE = {"color": (0, 0, 0, 255), "dotted": False}
+ARROW_STYLES = {
+    "grow":        {"color": (0, 0, 0, 255),     "dotted": False},
+    "growth":      {"color": (0, 0, 0, 255),     "dotted": False},
+    "merge":       {"color": (0, 0, 0, 255),     "dotted": True},
+    "fuse":        {"color": (0, 0, 0, 255),     "dotted": True},
+    "fusion":      {"color": (0, 0, 0, 255),     "dotted": True},
+    "measure":     {"color": (0, 90, 200, 255),  "dotted": False},
+    "measurement": {"color": (0, 90, 200, 255),  "dotted": False},
+    "correct":     {"color": (215, 25, 28, 255), "dotted": False},
+    "correction":  {"color": (215, 25, 28, 255), "dotted": False},
+}
+_ARROW_NONE = {"none", "skip", "-"}
+
+
 def natural_key(path):
     """Sort key that orders ``step_2`` before ``step_10``."""
     name = os.path.basename(path)
@@ -42,7 +78,7 @@ def natural_key(path):
 
 
 def find_images(folder, image_glob, errors_name="errors.png"):
-    """Return the sorted list of image paths for a folder.
+    """Return ``(sorted image paths, base directory)`` for a folder.
 
     Looks in the folder itself and, as a fallback, in an ``animation``
     subdirectory (where the renderer writes its frames). If an errors image is
@@ -59,7 +95,60 @@ def find_images(folder, image_glob, errors_name="errors.png"):
         errors_path = os.path.join(base, errors_name)
         if os.path.isfile(errors_path):
             images = [errors_path] + images
-    return images
+    return images, base
+
+
+def parse_arrow_line(line):
+    """Turn one ``arrows.txt`` line into a list of arrow style dicts.
+
+    Blank -> the default single black arrow; ``none`` -> no arrow; otherwise one
+    style per recognised word, in the given order (so several words draw several
+    parallel arrows).
+    """
+    tokens = line.split()
+    if not tokens:
+        return [DEFAULT_ARROW_STYLE]
+    if len(tokens) == 1 and tokens[0].lower() in _ARROW_NONE:
+        return []
+    styles = []
+    for tok in tokens:
+        key = tok.lower()
+        if key in _ARROW_NONE:
+            continue
+        style = ARROW_STYLES.get(key)
+        if style is None:
+            print(f"[WARN] arrows: unknown type '{tok}' (ignored)")
+            continue
+        styles.append(style)
+    return styles or [DEFAULT_ARROW_STYLE]
+
+
+def load_arrow_specs(base, name, n_gaps):
+    """Return a list of ``n_gaps`` arrow specs (each a list of style dicts).
+
+    Reads ``<base>/<name>`` if present: one entry per non-``#`` line, in order.
+    Missing file or missing lines fall back to the default single black arrow.
+    """
+    specs = [[DEFAULT_ARROW_STYLE] for _ in range(max(0, n_gaps))]
+    if not name:
+        return specs
+    path = os.path.join(base, name)
+    if not os.path.isfile(path):
+        return specs
+
+    entries = []
+    with open(path) as fh:
+        for raw in fh:
+            if raw.lstrip().startswith('#'):
+                continue
+            entries.append(parse_arrow_line(raw.split('#', 1)[0].strip()))
+
+    if len(entries) > n_gaps:
+        print(f"[WARN] {path}: {len(entries)} arrow lines for {n_gaps} gaps; extra ignored")
+    for i in range(min(n_gaps, len(entries))):
+        specs[i] = entries[i]
+    print(f"[INFO] {path}: {len(entries)} arrow spec line(s)")
+    return specs
 
 
 def content_bbox(img):
@@ -141,8 +230,11 @@ def load_font(size):
             return ImageFont.load_default()
 
 
-def draw_arrow(draw, start, end, color, width, head):
-    """Draw a straight arrow from ``start`` to ``end``."""
+def draw_arrow(draw, start, end, color, width, head, dotted=False):
+    """Draw a straight arrow from ``start`` to ``end``.
+
+    With ``dotted`` the shaft is drawn as short dashes; the head stays solid.
+    """
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = (dx * dx + dy * dy) ** 0.5
@@ -153,14 +245,58 @@ def draw_arrow(draw, start, end, color, width, head):
     px, py = -uy, ux  # perpendicular unit vector
     base = (end[0] - ux * head, end[1] - uy * head)
     # Stop the shaft at the base of the head so the tip is not blunted by the line.
-    draw.line([start, base], fill=color, width=width)
+    if dotted:
+        shaft = length - head
+        on, off = max(2, int(width * 0.9)), max(4, int(width * 1.9))
+        pos = 0.0
+        while pos < shaft:
+            a = (start[0] + ux * pos, start[1] + uy * pos)
+            stop = min(pos + on, shaft)
+            b = (start[0] + ux * stop, start[1] + uy * stop)
+            draw.line([a, b], fill=color, width=width)
+            pos += on + off
+    else:
+        draw.line([start, base], fill=color, width=width)
     left = (base[0] + px * head * 0.5, base[1] + py * head * 0.5)
     right = (base[0] - px * head * 0.5, base[1] - py * head * 0.5)
     draw.polygon([end, left, right], fill=color)
 
 
-def build_section(images, columns, spacing_x, spacing_y, arrow_color, arrow_width, head):
-    """Lay out one folder's images into a snake with arrows. Returns an RGBA image."""
+def draw_parallel_arrows(draw, start, end, styles, width, head, sep):
+    """Draw one arrow per style between ``start`` and ``end``, spread sideways.
+
+    The styles are laid out in reading order: left-to-right for a vertical
+    (top-down) arrow, top-to-bottom for a horizontal one -- so ``measure grow``
+    is a blue arrow then a black arrow, in that visual order.
+    """
+    if not styles:
+        return
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = (dx * dx + dy * dy) ** 0.5
+    if length == 0:
+        return
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux  # perpendicular unit vector
+    # Orient the spread so increasing style index moves right (vertical arrow)
+    # or down (horizontal arrow), regardless of the flow direction.
+    if abs(px) >= abs(py):
+        if px < 0:
+            px, py = -px, -py
+    elif py < 0:
+        px, py = -px, -py
+    k = len(styles)
+    for j, style in enumerate(styles):
+        off = (j - (k - 1) / 2.0) * sep
+        s = (start[0] + px * off, start[1] + py * off)
+        e = (end[0] + px * off, end[1] + py * off)
+        draw_arrow(draw, s, e, style["color"], width, head, style["dotted"])
+
+
+def build_section(images, columns, spacing_x, spacing_y, arrow_specs, arrow_width, head, arrow_sep):
+    """Lay out one folder's images into a snake with arrows. Returns an RGBA image.
+
+    ``arrow_specs[i]`` is the list of arrow styles for the gap after image ``i``.
+    """
     n = len(images)
     img_w = images[0].width
     img_h = images[0].height
@@ -198,7 +334,8 @@ def build_section(images, columns, spacing_x, spacing_y, arrow_color, arrow_widt
             cx = x0 + img_w / 2
             start = (cx, y0 + img_h + inset_y)
             end = (cx, y1 - inset_y)
-        draw_arrow(draw, start, end, arrow_color, arrow_width, head)
+        styles = arrow_specs[idx] if idx < len(arrow_specs) else [DEFAULT_ARROW_STYLE]
+        draw_parallel_arrows(draw, start, end, styles, arrow_width, head, arrow_sep)
 
     return section
 
@@ -209,7 +346,9 @@ def main():
     parser.add_argument('folders', nargs='+', help='Folders of step images, one section each.')
     parser.add_argument('--output', '-o', default='snake_figure.png', help='Output image path.')
     parser.add_argument('--labels', nargs='+', default=None,
-                        help='Section labels (one per folder). Defaults to folder names.')
+                        help='Section labels (one per folder). Either several arguments, or a '
+                             'single ";"-separated string (so --labels=... works). '
+                             'Defaults to folder names.')
     parser.add_argument('--columns', type=int, default=4, help='Images per row (default: 4).')
     parser.add_argument('--image-glob', default='step_*.png', help='Glob for images in each folder.')
     parser.add_argument('--errors-name', default='errors.png',
@@ -221,16 +360,26 @@ def main():
     parser.add_argument('--label-size', type=int, default=100, help='Font size for section labels.')
     parser.add_argument('--arrow-width', type=int, default=10, help='Arrow line width.')
     parser.add_argument('--arrow-head', type=int, default=38, help='Arrow head size.')
+    parser.add_argument('--arrow-sep', type=int, default=None,
+                        help='Sideways spacing between parallel arrows of one gap '
+                             '(default: 2.6x --arrow-width).')
+    parser.add_argument('--arrows-name', default='arrows.txt',
+                        help='Per-folder arrow-type file (set empty to disable). See module docstring.')
     parser.add_argument('--per-image-crop', action='store_true',
                         help='Crop each image to its own content (default: common box per section).')
     parser.add_argument('--transparent', action='store_true', help='Transparent background (default: white).')
     parser.add_argument('--dpi', type=int, default=300, help='DPI metadata for the saved PNG.')
     args = parser.parse_args()
 
+    # Allow one ";"-separated string as well as several arguments, so that
+    # --labels="A;B" (which argparse's "=" form limits to a single token) works.
+    if args.labels and len(args.labels) == 1 and ';' in args.labels[0]:
+        args.labels = [s.strip() for s in args.labels[0].split(';')]
+
     if args.labels and len(args.labels) != len(args.folders):
         parser.error(f"--labels expects {len(args.folders)} labels, got {len(args.labels)}.")
 
-    arrow_color = (0, 0, 0, 255)
+    arrow_sep = args.arrow_sep if args.arrow_sep is not None else int(round(args.arrow_width * 5.6))
     font = load_font(args.label_size)
     label_band = args.label_size + 12  # vertical space reserved for each label
 
@@ -238,13 +387,14 @@ def main():
     sections = []
     labels = []
     for i, folder in enumerate(args.folders):
-        paths = find_images(folder, args.image_glob, args.errors_name)
+        paths, base = find_images(folder, args.image_glob, args.errors_name)
         if not paths:
             print(f"[WARN] No images matching '{args.image_glob}' in {folder}; skipping.")
             continue
         images = load_cropped_images(paths, args.padding, args.per_image_crop)
+        arrow_specs = load_arrow_specs(base, args.arrows_name, len(paths) - 1)
         section = build_section(images, args.columns, args.spacing_x, args.spacing_y,
-                                arrow_color, args.arrow_width, args.arrow_head)
+                                arrow_specs, args.arrow_width, args.arrow_head, arrow_sep)
         sections.append(section)
         labels.append(args.labels[i] if args.labels else os.path.basename(os.path.normpath(folder)))
         print(f"[INFO] {folder}: {len(paths)} images -> {section.width}x{section.height}")
