@@ -1,6 +1,8 @@
 # cayg
 
-Simulation and decoding code for the paper **"Reducing the Decoding Latency by During-Measurement Clustering"**.
+[![DOI](https://zenodo.org/badge/753687432.svg)](https://doi.org/10.5281/zenodo.22008965)
+
+Simulation and decoding code for the paper **"Reducing Decoding Latency in Quantum Error Correction by Early Starting Clustering"**.
 
 The project implements CAYG (a during-measurement clustering decoder) alongside a Union-Find baseline and a Peeling decoder for the rotated surface code, and provides tooling to run large-scale Monte Carlo simulations and turn the results into the paper's figures.
 
