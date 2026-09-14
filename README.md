@@ -12,7 +12,6 @@ The project implements CAYG (a during-measurement clustering decoder) alongside 
   - `param_generator.py`, `submit_cayg_array_job.sh` — generate parameter sweeps and submit them as SLURM array jobs.
   - `decoding_graph_renderer.py`, `diagram_data_generator.cpp`, `surface_code_check.cpp` — visualization and sanity-check helpers.
 - **`data/`** — Simulation output (results, logs, generated data), organized by experiment.
-- **`paper/`** — LaTeX source, figures, and supporting material for the paper and related presentations.
 
 ## Building
 
